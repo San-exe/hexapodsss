@@ -1,0 +1,263 @@
+import logging
+import math
+import time
+
+from build_hexapod import (
+    HIP_TORQUE_LIMIT,
+    KNEE_TORQUE_LIMIT,
+    LEG_COUNT,
+    LOWER_LEG_MASS,
+    LOWER_LEG_LENGTH,
+    ROBOT_BODY_MASS,
+    RESPONDABLE_MASK,
+    UPPER_LEG_LENGTH,
+    UPPER_LEG_MASS,
+    leg_geometry,
+)
+
+
+LOGGER = logging.getLogger("hexapod.physics_stance")
+SETTLING_STEPS = 200
+STOP_TIMEOUT_SECONDS = 5.0
+
+
+def _matrix_axis(matrix, axis_index):
+    return (
+        matrix[axis_index],
+        matrix[axis_index + 4],
+        matrix[axis_index + 8],
+    )
+
+
+def _stop_simulation(sim):
+    if sim.getSimulationState() == sim.simulation_stopped:
+        return
+    sim.stopSimulation()
+    deadline = time.monotonic() + STOP_TIMEOUT_SECONDS
+    while sim.getSimulationState() != sim.simulation_stopped:
+        if time.monotonic() >= deadline:
+            raise RuntimeError("CoppeliaSim did not stop within the safe-stop timeout.")
+        time.sleep(0.02)
+
+
+def verify_physics_stance():
+    from coppeliasim_zmqremoteapi_client import RemoteAPIClient
+
+    client = RemoteAPIClient()
+    sim = client.require("sim")
+    if sim.getSimulationState() != sim.simulation_stopped:
+        raise RuntimeError("Stop CoppeliaSim before running the stance check.")
+
+    body = sim.getObject("/HexapodBody", {"noError": True})
+    ground = sim.getObject("/Ground", {"noError": True})
+    if body == -1 or ground == -1:
+        raise RuntimeError("Build the model with `python build_hexapod.py --mode physics`.")
+
+    robot_tree = sim.getObjectsInTree(body, sim.handle_all, 0)
+    if len(robot_tree) != 25:
+        raise RuntimeError(
+            f"Expected 25 robot objects, but found {len(robot_tree)}."
+        )
+    if sim.getBoolProperty(body, "dynamic") is not True:
+        raise RuntimeError("Robot body is not dynamically enabled.")
+    if sim.getBoolProperty(body, "respondable") is not True:
+        raise RuntimeError("Robot body is not respondable.")
+    if sim.getIntProperty(body, "respondableMask") != RESPONDABLE_MASK:
+        raise RuntimeError("Robot body collision mask differs from the configured mask.")
+    if not math.isclose(sim.getShapeMass(body), ROBOT_BODY_MASS, abs_tol=1e-9):
+        raise RuntimeError("Robot body mass does not match physics configuration.")
+    if sim.getBoolProperty(ground, "dynamic") is not False:
+        raise RuntimeError("Ground must remain static.")
+    if sim.getBoolProperty(ground, "respondable") is not True:
+        raise RuntimeError("Ground must be respondable.")
+    if sim.getIntProperty(ground, "respondableMask") != RESPONDABLE_MASK:
+        raise RuntimeError("Ground collision mask differs from the configured mask.")
+
+    for index in range(1, LEG_COUNT + 1):
+        geometry = leg_geometry(index)
+        hip = sim.getObject(f"/HexapodBody/HipJoint_{index}")
+        upper = sim.getObject(
+            f"/HexapodBody/HipJoint_{index}/UpperLeg_{index}"
+        )
+        knee = sim.getObject(
+            f"/HexapodBody/HipJoint_{index}/UpperLeg_{index}/KneeJoint_{index}"
+        )
+        lower = sim.getObject(
+            f"/HexapodBody/HipJoint_{index}/UpperLeg_{index}/"
+            f"KneeJoint_{index}/LowerLeg_{index}"
+        )
+        if sim.getObjectParent(hip) != body:
+            raise RuntimeError(f"Leg {index} hip is not attached to the body.")
+        if sim.getObjectParent(upper) != hip:
+            raise RuntimeError(f"Leg {index} upper segment is not hip-parented.")
+        if sim.getObjectParent(knee) != upper:
+            raise RuntimeError(f"Leg {index} knee is not attached to the upper segment.")
+        if sim.getObjectParent(lower) != knee:
+            raise RuntimeError(f"Leg {index} lower segment is not knee-parented.")
+        world_hip_position = sim.getObjectPosition(hip, sim.handle_world)
+        if any(
+            not math.isclose(actual, expected, abs_tol=1e-8)
+            for actual, expected in zip(world_hip_position, geometry.hip_position)
+        ):
+            raise RuntimeError(f"Leg {index} hip world pose differs from its layout.")
+        for handle, expected_position in (
+            (upper, geometry.upper_center),
+            (knee, geometry.knee_position),
+            (lower, geometry.lower_center),
+        ):
+            actual_position = sim.getObjectPosition(handle, sim.handle_world)
+            if any(
+                not math.isclose(actual, expected, abs_tol=1e-8)
+                for actual, expected in zip(actual_position, expected_position)
+            ):
+                raise RuntimeError(
+                    f"Leg {index} segment endpoint is misaligned in world space."
+                )
+
+        radial = (math.cos(geometry.angle), math.sin(geometry.angle), 0.0)
+        tangent = (-math.sin(geometry.angle), math.cos(geometry.angle), 0.0)
+        for joint in (hip, knee):
+            matrix = sim.getObjectMatrix(joint, sim.handle_world)
+            for axis, expected_axis in (
+                (_matrix_axis(matrix, 0), radial),
+                (_matrix_axis(matrix, 1), (0.0, 0.0, -1.0)),
+                (_matrix_axis(matrix, 2), tangent),
+            ):
+                if any(
+                    not math.isclose(actual, expected, abs_tol=1e-8)
+                    for actual, expected in zip(axis, expected_axis)
+                ):
+                    raise RuntimeError(
+                        f"Leg {index} joint axes do not match the radial plane."
+                    )
+
+        lower_matrix = sim.getObjectMatrix(lower, sim.handle_world)
+        lower_down_axis = _matrix_axis(lower_matrix, 1)
+        foot_position = tuple(
+            actual + LOWER_LEG_LENGTH * lower_down_axis[axis] / 2
+            for axis, actual in enumerate(
+                sim.getObjectPosition(lower, sim.handle_world)
+            )
+        )
+        if not math.isclose(foot_position[2], 0.0, abs_tol=1e-8):
+            raise RuntimeError(
+                f"Leg {index} initial foot does not reach ground: "
+                f"z={foot_position[2]:.5f} m."
+            )
+        if not math.isclose(sim.getJointPosition(hip), 0.0, abs_tol=0.02):
+            raise RuntimeError(f"Leg {index} hip is not in its neutral stance pose.")
+        if not math.isclose(sim.getJointPosition(knee), 0.0, abs_tol=0.02):
+            raise RuntimeError(f"Leg {index} knee is not in its neutral stance pose.")
+        for object_handle, expected_position, expected_parent in (
+            (upper, [UPPER_LEG_LENGTH / 2, 0.0, 0.0], hip),
+            (knee, [UPPER_LEG_LENGTH / 2, 0.0, 0.0], upper),
+            (lower, [0.0, LOWER_LEG_LENGTH / 2, 0.0], knee),
+        ):
+            actual_position = sim.getObjectPosition(object_handle, expected_parent)
+            if any(
+                not math.isclose(actual, expected, abs_tol=1e-8)
+                for actual, expected in zip(actual_position, expected_position)
+            ):
+                raise RuntimeError(
+                    f"Leg {index} segment/joint local transform is misaligned."
+                )
+            actual_orientation = sim.getObjectOrientation(
+                object_handle,
+                expected_parent,
+            )
+            if any(abs(value) > 1e-8 for value in actual_orientation):
+                raise RuntimeError(
+                    f"Leg {index} child frame is independently rotated from its joint."
+                )
+
+        for shape, expected_mass in (
+            (upper, UPPER_LEG_MASS),
+            (lower, LOWER_LEG_MASS),
+        ):
+            if sim.getBoolProperty(shape, "dynamic") is not True:
+                raise RuntimeError(f"Leg {index} contains a non-dynamic link.")
+            if sim.getBoolProperty(shape, "respondable") is not True:
+                raise RuntimeError(f"Leg {index} contains a non-respondable link.")
+            if sim.getIntProperty(shape, "respondableMask") != RESPONDABLE_MASK:
+                raise RuntimeError(f"Leg {index} link collision mask is incorrect.")
+            if not math.isclose(
+                sim.getShapeMass(shape),
+                expected_mass,
+                abs_tol=1e-9,
+            ):
+                raise RuntimeError(f"Leg {index} link mass is incorrectly configured.")
+
+        hip = sim.getObject(f"/HexapodBody/HipJoint_{index}")
+        knee = sim.getObject(
+            f"/HexapodBody/HipJoint_{index}/UpperLeg_{index}/KneeJoint_{index}"
+        )
+        for joint, torque_limit in (
+            (hip, HIP_TORQUE_LIMIT),
+            (knee, KNEE_TORQUE_LIMIT),
+        ):
+            mode, _ = sim.getJointMode(joint)
+            if mode != sim.jointmode_dynamic:
+                raise RuntimeError(f"Leg {index} contains a non-dynamic joint.")
+            if sim.getObjectInt32Param(joint, sim.jointintparam_motor_enabled) != 1:
+                raise RuntimeError(f"Leg {index} has a disabled motor.")
+            if sim.getObjectInt32Param(joint, sim.jointintparam_ctrl_enabled) != 1:
+                raise RuntimeError(f"Leg {index} has a disabled position controller.")
+            if not math.isclose(
+                sim.getJointTargetForce(joint),
+                torque_limit,
+                abs_tol=1e-6,
+            ):
+                raise RuntimeError(f"Leg {index} has an incorrect torque limit.")
+
+    client.setStepping(True)
+    start_z = sim.getObjectPosition(body, sim.handle_world)[2]
+    simulation_started = False
+    end_z = start_z
+    contact_point = None
+    try:
+        sim.startSimulation()
+        simulation_started = True
+        for _ in range(SETTLING_STEPS):
+            client.step()
+        end_z = sim.getObjectPosition(body, sim.handle_world)[2]
+        if not sim.isDynamicallyEnabled(body):
+            raise RuntimeError("Physics engine did not dynamically enable the body.")
+        if abs(end_z - start_z) >= 0.02:
+            raise RuntimeError(
+                f"Body did not settle stably: z changed {start_z:.4f} -> {end_z:.4f} m."
+            )
+
+        collision_pair, contact_point, contact_force, _ = sim.getContactInfo(
+            sim.handle_all,
+            ground,
+            0,
+        )
+        if ground not in collision_pair:
+            raise RuntimeError("No ground contact was reported after settling.")
+        if not any(handle in robot_tree for handle in collision_pair if handle != ground):
+            raise RuntimeError("Ground contact did not involve the robot.")
+        if abs(contact_point[2]) >= 0.002:
+            raise RuntimeError(
+                f"Ground contact point is not on the floor: z={contact_point[2]:.5f} m."
+            )
+        if sum(component * component for component in contact_force) <= 0:
+            raise RuntimeError("Ground contact did not report a reaction force.")
+    finally:
+        if simulation_started:
+            _stop_simulation(sim)
+
+    LOGGER.info(
+        "Physics stance passed: body z %.5f -> %.5f m; contact at z=%.7f m",
+        start_z,
+        end_z,
+        contact_point[2],
+    )
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    verify_physics_stance()
+
+
+if __name__ == "__main__":
+    main()

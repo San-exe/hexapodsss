@@ -1,0 +1,201 @@
+
+import math
+import logging
+from typing import NamedTuple
+
+
+LOGGER = logging.getLogger("hexapod.geometry")
+
+BODY_SIZE = (0.26, 0.22, 0.06)
+BODY_CENTER_Z = 0.34
+GROUND_SIZE = (2.0, 2.0, 0.02)
+GROUND_CENTER_Z = -0.01
+HIP_ANCHOR_CLEARANCE = 0.005
+UPPER_LEG_LENGTH = 0.16
+LOWER_LEG_LENGTH = BODY_CENTER_Z
+LEG_COUNT = 6
+
+
+class LegGeometry(NamedTuple):
+    index: int
+    angle: float
+    hip_position: tuple[float, float, float]
+    upper_center: tuple[float, float, float]
+    knee_position: tuple[float, float, float]
+    lower_center: tuple[float, float, float]
+    hip_orientation: tuple[float, float, float]
+    knee_orientation: tuple[float, float, float]
+
+
+def leg_geometry(index: int) -> LegGeometry:
+    """Return the world-space geometry for one radially arranged leg."""
+    if not 1 <= index <= LEG_COUNT:
+        raise ValueError(f"leg index must be between 1 and {LEG_COUNT}")
+
+    angle = (index - 1) * math.tau / LEG_COUNT
+    radial_x = math.cos(angle)
+    radial_y = math.sin(angle)
+
+    body_edge_radii = []
+    if abs(radial_x) > 1e-12:
+        body_edge_radii.append((BODY_SIZE[0] / 2) / abs(radial_x))
+    if abs(radial_y) > 1e-12:
+        body_edge_radii.append((BODY_SIZE[1] / 2) / abs(radial_y))
+    hip_radius = min(body_edge_radii) + HIP_ANCHOR_CLEARANCE
+    knee_radius = hip_radius + UPPER_LEG_LENGTH
+
+    hip_position = (
+        hip_radius * radial_x,
+        hip_radius * radial_y,
+        BODY_CENTER_Z,
+    )
+    knee_position = (
+        knee_radius * radial_x,
+        knee_radius * radial_y,
+        BODY_CENTER_Z,
+    )
+    upper_center = (
+        (hip_position[0] + knee_position[0]) / 2,
+        (hip_position[1] + knee_position[1]) / 2,
+        BODY_CENTER_Z,
+    )
+    lower_center = (
+        knee_position[0],
+        knee_position[1],
+        BODY_CENTER_Z - LOWER_LEG_LENGTH / 2,
+    )
+
+    return LegGeometry(
+        index=index,
+        angle=angle,
+        hip_position=hip_position,
+        upper_center=upper_center,
+        knee_position=knee_position,
+        lower_center=lower_center,
+        hip_orientation=(0.0, 0.0, angle),
+        knee_orientation=(math.pi / 2, 0.0, angle),
+    )
+
+
+def create_box(sim, name, size, position, orientation=None):
+    """Create and pose a cuboid in world coordinates."""
+    obj = sim.createPrimitiveShape(
+        sim.primitiveshape_cuboid,
+        list(size),
+        0,
+    )
+    sim.setObjectAlias(obj, name)
+    sim.setObjectPosition(obj, list(position), sim.handle_world)
+
+    if orientation is not None:
+        sim.setObjectOrientation(obj, list(orientation), sim.handle_world)
+
+    return obj
+
+
+def create_revolute_joint(sim, name, position, orientation):
+    """Create a kinematic revolute joint at its world-space attachment frame."""
+    joint = sim.createJoint(
+        sim.joint_revolute_subtype,
+        sim.jointmode_kinematic,
+        0,
+        [0.04, 0.02],
+    )
+    sim.setObjectAlias(joint, name)
+    sim.setObjectPosition(joint, list(position), sim.handle_world)
+    sim.setObjectOrientation(joint, list(orientation), sim.handle_world)
+    return joint
+
+
+def _remove_previous_generated_objects(sim):
+    body = sim.getObject("/HexapodBody", {"noError": True})
+    if body != -1:
+        sim.removeObjects(sim.getObjectsInTree(body, sim.handle_all, 0))
+
+    ground = sim.getObject("/Ground", {"noError": True})
+    if ground != -1:
+        sim.removeObjects([ground])
+
+
+def build_scene(sim):
+    """Build the first-stage, kinematic geometry in the open scene."""
+    if sim.getSimulationState() != sim.simulation_stopped:
+        raise RuntimeError("Stop the CoppeliaSim simulation before rebuilding.")
+
+    _remove_previous_generated_objects(sim)
+
+    ground = create_box(
+        sim,
+        "Ground",
+        GROUND_SIZE,
+        (0.0, 0.0, GROUND_CENTER_Z),
+    )
+    body = create_box(
+        sim,
+        "HexapodBody",
+        BODY_SIZE,
+        (0.0, 0.0, BODY_CENTER_Z),
+    )
+
+    legs = []
+    for index in range(1, LEG_COUNT + 1):
+        geometry = leg_geometry(index)
+        suffix = str(index)
+
+        hip = create_revolute_joint(
+            sim,
+            f"HipJoint_{suffix}",
+            geometry.hip_position,
+            geometry.hip_orientation,
+        )
+        upper = create_box(
+            sim,
+            f"UpperLeg_{suffix}",
+            (UPPER_LEG_LENGTH, 0.035, 0.035),
+            geometry.upper_center,
+            (0.0, 0.0, geometry.angle),
+        )
+        knee = create_revolute_joint(
+            sim,
+            f"KneeJoint_{suffix}",
+            geometry.knee_position,
+            geometry.knee_orientation,
+        )
+        lower = create_box(
+            sim,
+            f"LowerLeg_{suffix}",
+            (0.035, 0.035, LOWER_LEG_LENGTH),
+            geometry.lower_center,
+        )
+
+        # World poses are set first; keepInPlace preserves these attachment frames.
+        sim.setObjectParent(hip, body, True)
+        sim.setObjectParent(upper, hip, True)
+        sim.setObjectParent(knee, upper, True)
+        sim.setObjectParent(lower, knee, True)
+        legs.append((hip, knee))
+        LOGGER.info("Created leg %d at %.1f degrees", index, math.degrees(geometry.angle))
+
+    return {"ground": ground, "body": body, "legs": legs}
+
+
+def main():
+    from coppeliasim_zmqremoteapi_client import RemoteAPIClient
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    LOGGER.info("Connecting to CoppeliaSim ZeroMQ Remote API")
+    client = RemoteAPIClient()
+    sim = client.require("sim")
+    scene = build_scene(sim)
+    LOGGER.info(
+        "Generated %d legs and %d kinematic revolute joints",
+        len(scene["legs"]),
+        2 * len(scene["legs"]),
+    )
+    LOGGER.warning(
+        "Geometry stage only: this model is not configured or validated for physics walking."
+    )
+
+
+if __name__ == "__main__":
+    main()
