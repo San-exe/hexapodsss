@@ -18,6 +18,8 @@ from tripod_gait_physics import (
     CYCLE_SECONDS,
     STANCE_DUTY_FACTOR,
     SWING_HEIGHT,
+    TRIPOD_A,
+    TRIPOD_B,
     foot_target,
     forward_kinematics,
     leg_joint_targets,
@@ -381,17 +383,17 @@ class HexapodGeometryTests(unittest.TestCase):
                 leg_geometry(index)
 
     def test_tripod_phase_and_left_right_radial_motion_are_mirrored(self):
-        odd_tripod_time = CYCLE_SECONDS * 0.825
-        odd_lift = [foot_target(index, odd_tripod_time)[1] for index in (1, 3, 5)]
-        even_lift = [foot_target(index, odd_tripod_time)[1] for index in (2, 4, 6)]
-        self.assertTrue(all(value > 0 for value in odd_lift))
-        self.assertTrue(all(value == 0 for value in even_lift))
+        tripod_a_time = CYCLE_SECONDS * 0.825
+        tripod_a_lift = [foot_target(index, tripod_a_time)[1] for index in TRIPOD_A]
+        tripod_b_lift = [foot_target(index, tripod_a_time)[1] for index in TRIPOD_B]
+        self.assertTrue(all(value > 0 for value in tripod_a_lift))
+        self.assertTrue(all(value == 0 for value in tripod_b_lift))
 
-        even_tripod_time = CYCLE_SECONDS * 0.325
-        odd_lift = [foot_target(index, even_tripod_time)[1] for index in (1, 3, 5)]
-        even_lift = [foot_target(index, even_tripod_time)[1] for index in (2, 4, 6)]
-        self.assertTrue(all(value == 0 for value in odd_lift))
-        self.assertTrue(all(value > 0 for value in even_lift))
+        tripod_b_time = CYCLE_SECONDS * 0.325
+        tripod_a_lift = [foot_target(index, tripod_b_time)[1] for index in TRIPOD_A]
+        tripod_b_lift = [foot_target(index, tripod_b_time)[1] for index in TRIPOD_B]
+        self.assertTrue(all(value == 0 for value in tripod_a_lift))
+        self.assertTrue(all(value > 0 for value in tripod_b_lift))
 
         for left_index, right_index in ((1, 2), (3, 4), (5, 6)):
             for phase in (0.0, 0.3, 0.7, 0.9):
@@ -486,6 +488,54 @@ class HexapodGeometryTests(unittest.TestCase):
     def test_inverse_kinematics_rejects_unreachable_targets(self):
         with self.assertRaises(ValueError):
             solve_planar_ik(UPPER_LEG_LENGTH + LOWER_LEG_LENGTH + 0.1, 0.1)
+
+    def test_tripod_support_polygons_contain_center_of_mass(self):
+        """Verify that both Tripod A and B enclose the body center of mass (0, 0)."""
+        def foot_xy(index):
+            leg = self.legs[index - 1]
+            reach, _ = foot_target(index, 0.0)
+            return (
+                leg.hip_position[0] + reach * math.cos(leg.angle),
+                leg.hip_position[1] + reach * math.sin(leg.angle),
+            )
+
+        def point_in_triangle(p, a, b, c):
+            cp1 = _cross((b[0] - a[0], b[1] - a[1]), (p[0] - a[0], p[1] - a[1]))
+            cp2 = _cross((c[0] - b[0], c[1] - b[1]), (p[0] - b[0], p[1] - b[1]))
+            cp3 = _cross((a[0] - c[0], a[1] - c[1]), (p[0] - c[0], p[1] - c[1]))
+            return (cp1 > 0 and cp2 > 0 and cp3 > 0) or (cp1 < 0 and cp2 < 0 and cp3 < 0)
+
+        com = (0.0, 0.0)
+        for name, tripod in (("Tripod A", TRIPOD_A), ("Tripod B", TRIPOD_B)):
+            pts = [foot_xy(idx) for idx in tripod]
+            self.assertTrue(
+                point_in_triangle(com, pts[0], pts[1], pts[2]),
+                f"{name} support polygon does not enclose the center of mass (0, 0)",
+            )
+
+    def test_tripod_duty_factor_maintains_continuous_support(self):
+        """Verify that at every time step, at least 3 legs provide ground support."""
+        for step in range(200):
+            t = CYCLE_SECONDS * step / 200
+            grounded_legs = sum(
+                1 for index in range(1, LEG_COUNT + 1)
+                if foot_target(index, t)[1] == 0.0
+            )
+            self.assertGreaterEqual(
+                grounded_legs,
+                3,
+                f"Less than 3 legs grounded at t={t:.3f} s",
+            )
+
+    def test_all_legs_ik_within_limits_at_nominal_height_with_safety_margin(self):
+        """Verify all legs stay well within limits across a full cycle at nominal height."""
+        for index in range(1, LEG_COUNT + 1):
+            for step in range(200):
+                t = CYCLE_SECONDS * step / 200
+                hip, knee = leg_joint_targets(index, t, BODY_CENTER_Z)
+                self.assertLess(abs(hip), 0.35, f"Leg {index} hip {hip} exceeds margin")
+                self.assertGreater(knee, -0.10)
+                self.assertLess(knee, 0.40)
 
 
 if __name__ == "__main__":

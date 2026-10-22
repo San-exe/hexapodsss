@@ -4,6 +4,7 @@ import math
 import time
 
 from build_hexapod import (
+    BODY_CENTER_Z,
     HIP_LIMITS,
     KNEE_LIMITS,
     LEG_COUNT,
@@ -19,6 +20,8 @@ STANCE_DUTY_FACTOR = 0.65
 STRIDE_LENGTH = 0.05
 SWING_HEIGHT = 0.04
 STOP_TIMEOUT_SECONDS = 5.0
+TRIPOD_A = (1, 4, 5)  # Front-Left, Middle-Right, Rear-Left
+TRIPOD_B = (2, 3, 6)  # Front-Right, Middle-Left, Rear-Right
 
 
 def foot_target(leg_index, elapsed, cycle_seconds=CYCLE_SECONDS):
@@ -32,7 +35,7 @@ def foot_target(leg_index, elapsed, cycle_seconds=CYCLE_SECONDS):
 
     leg = leg_geometry(leg_index)
     forward_projection = math.cos(leg.angle)
-    phase_offset = 0.0 if leg_index % 2 else 0.5
+    phase_offset = 0.0 if leg_index in TRIPOD_A else 0.5
     phase = (elapsed / cycle_seconds + phase_offset) % 1.0
 
     if phase < STANCE_DUTY_FACTOR:
@@ -93,7 +96,7 @@ def forward_kinematics(hip_angle, knee_angle):
 def leg_joint_targets(
     leg_index,
     elapsed,
-    body_height,
+    body_height=BODY_CENTER_Z,
     cycle_seconds=CYCLE_SECONDS,
 ):
     """Convert a tripod foot target to joint angles and enforce safe limits."""
@@ -183,12 +186,11 @@ def run_gait(cycles=3, cycle_seconds=CYCLE_SECONDS):
         start_time = sim.getSimulationTime()
         while sim.getSimulationTime() - start_time < cycles * cycle_seconds:
             elapsed = sim.getSimulationTime() - start_time
-            body_z = sim.getObjectPosition(body, sim.handle_world)[2]
             for index, (hip, knee) in enumerate(legs, start=1):
                 hip_angle, knee_angle = leg_joint_targets(
                     index,
                     elapsed,
-                    body_z,
+                    BODY_CENTER_Z,
                     cycle_seconds,
                 )
                 sim.setJointTargetPosition(hip, hip_angle)
@@ -196,9 +198,12 @@ def run_gait(cycles=3, cycle_seconds=CYCLE_SECONDS):
 
             client.step()
             cycle_number = int(elapsed / cycle_seconds)
-            if cycle_number != last_logged_cycle:
+            if cycle_number > last_logged_cycle and cycle_number > 0:
                 last_logged_cycle = cycle_number
                 LOGGER.info("Completed tripod gait cycle %d of %d", cycle_number, cycles)
+
+        if last_logged_cycle < cycles:
+            LOGGER.info("Completed tripod gait cycle %d of %d", cycles, cycles)
 
         end_position = sim.getObjectPosition(body, sim.handle_world)
     except KeyboardInterrupt:
