@@ -209,12 +209,14 @@ def verify_physics_stance():
             ):
                 raise RuntimeError(f"Leg {index} has an incorrect torque limit.")
 
-    client.setStepping(True)
     start_z = sim.getObjectPosition(body, sim.handle_world)[2]
     simulation_started = False
+    stepping_enabled = False
     end_z = start_z
     contact_point = None
     try:
+        client.setStepping(True)
+        stepping_enabled = True
         sim.startSimulation()
         simulation_started = True
         for _ in range(SETTLING_STEPS):
@@ -227,22 +229,44 @@ def verify_physics_stance():
                 f"Body did not settle stably: z changed {start_z:.4f} -> {end_z:.4f} m."
             )
 
-        collision_pair, contact_point, contact_force, _ = sim.getContactInfo(
-            sim.handle_all,
-            ground,
-            0,
-        )
-        if ground not in collision_pair:
+        robot_tree_set = set(robot_tree)
+        active_contacts = []
+        any_ground_contact = False
+        any_robot_contact = False
+
+        idx = 0
+        while True:
+            info = sim.getContactInfo(sim.handle_all, ground, idx)
+            if not info or not info[0]:
+                break
+            collision_pair, pt, force, _ = info
+            idx += 1
+
+            if ground in collision_pair:
+                any_ground_contact = True
+                other = collision_pair[0] if collision_pair[1] == ground else collision_pair[1]
+                if other in robot_tree_set:
+                    any_robot_contact = True
+                    force_mag_sq = sum(component * component for component in force)
+                    if abs(pt[2]) < 0.002 and force_mag_sq > 1e-8:
+                        active_contacts.append((other, pt, force, math.sqrt(force_mag_sq)))
+
+        if not any_ground_contact:
             raise RuntimeError("No ground contact was reported after settling.")
-        if not any(handle in robot_tree for handle in collision_pair if handle != ground):
+        if not any_robot_contact:
             raise RuntimeError("Ground contact did not involve the robot.")
-        if abs(contact_point[2]) >= 0.002:
+        if not active_contacts:
             raise RuntimeError(
-                f"Ground contact point is not on the floor: z={contact_point[2]:.5f} m."
+                f"Ground contact points found ({idx}), but none reported an active, non-zero reaction force on the floor."
             )
-        if sum(component * component for component in contact_force) <= 0:
-            raise RuntimeError("Ground contact did not report a reaction force.")
+
+        contact_point = active_contacts[0][1]
     finally:
+        if stepping_enabled:
+            try:
+                client.setStepping(False)
+            except Exception as exc:
+                LOGGER.warning("Failed to restore stepping mode: %s", exc)
         if simulation_started:
             _stop_simulation(sim)
 

@@ -175,13 +175,15 @@ def run_gait(cycles=3, cycle_seconds=CYCLE_SECONDS):
         raise RuntimeError("Stop CoppeliaSim before starting the physics gait.")
 
     body, legs = _load_physics_legs(sim)
-    client.setStepping(True)
     start_position = sim.getObjectPosition(body, sim.handle_world)
     end_position = start_position
     last_logged_cycle = -1
     interrupted = False
+    stepping_enabled = False
 
     try:
+        client.setStepping(True)
+        stepping_enabled = True
         sim.startSimulation()
         start_time = sim.getSimulationTime()
         while sim.getSimulationTime() - start_time < cycles * cycle_seconds:
@@ -210,6 +212,11 @@ def run_gait(cycles=3, cycle_seconds=CYCLE_SECONDS):
         interrupted = True
         LOGGER.info("Gait interrupted; stopping simulation safely.")
     finally:
+        if stepping_enabled:
+            try:
+                client.setStepping(False)
+            except Exception as exc:
+                LOGGER.warning("Failed to restore stepping mode: %s", exc)
         _stop_simulation(sim)
 
     forward_distance = end_position[0] - start_position[0]
