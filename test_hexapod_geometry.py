@@ -16,7 +16,9 @@ from build_hexapod import (
 )
 from tripod_gait_physics import (
     CYCLE_SECONDS,
+    IN_PLACE_STRIDE_SCALE,
     STANCE_DUTY_FACTOR,
+    STRIDE_LENGTH,
     SWING_HEIGHT,
     TRIPOD_A,
     TRIPOD_B,
@@ -536,6 +538,207 @@ class HexapodGeometryTests(unittest.TestCase):
                 self.assertLess(abs(hip), 0.35, f"Leg {index} hip {hip} exceeds margin")
                 self.assertGreater(knee, -0.10)
                 self.assertLess(knee, 0.40)
+
+    def test_turning_parameter_validation(self):
+        """Verify that out-of-range turn rates are rejected."""
+        with self.assertRaises(ValueError):
+            foot_target(1, 0.0, turn_rate=1.5)
+        with self.assertRaises(ValueError):
+            foot_target(1, 0.0, turn_rate=-1.1)
+
+    def test_differential_turning_preserves_straight_baseline_at_zero_turn(self):
+        """Verify turn_rate=0.0 produces identical trajectories to default baseline."""
+        for index in range(1, LEG_COUNT + 1):
+            for step in range(50):
+                t = CYCLE_SECONDS * step / 50
+                r_base, l_base = foot_target(index, t)
+                r_turn, l_turn = foot_target(index, t, turn_rate=0.0, in_place=False)
+                self.assertEqual(r_base, r_turn)
+                self.assertEqual(l_base, l_turn)
+
+    def test_differential_turning_stride_asymmetry(self):
+        """Verify right legs take longer strides during left turns and vice versa."""
+        # Left turn: right legs take 1.5x nominal, left legs take 0.5x nominal
+        reach_l1_start, _ = foot_target(1, 0.0, turn_rate=0.5)
+        reach_l1_mid, _ = foot_target(1, CYCLE_SECONDS * 0.65, turn_rate=0.5)
+        reach_l2_start, _ = foot_target(2, 0.5 * CYCLE_SECONDS, turn_rate=0.5)
+        reach_l2_mid, _ = foot_target(2, (0.5 + 0.65) * CYCLE_SECONDS, turn_rate=0.5)
+
+        stride_l1 = abs(reach_l1_start - reach_l1_mid)
+        stride_l2 = abs(reach_l2_start - reach_l2_mid)
+        self.assertGreater(stride_l2, stride_l1, "Right leg stride should exceed left leg stride in left turn")
+
+        # Middle legs (3 and 4) have zero radial displacement in body frame
+        for t_step in range(20):
+            t = CYCLE_SECONDS * t_step / 20
+            r3, _ = foot_target(3, t, turn_rate=0.8)
+            r4, _ = foot_target(4, t, turn_rate=0.8)
+            self.assertAlmostEqual(r3, UPPER_LEG_LENGTH, places=7)
+            self.assertAlmostEqual(r4, UPPER_LEG_LENGTH, places=7)
+
+    def test_all_legs_ik_within_limits_across_all_turning_modes(self):
+        """Verify all legs satisfy joint limits across curved and in-place turning modes."""
+        modes = [
+            ("Arc Left", 0.5, False),
+            ("Arc Right", -0.5, False),
+            ("Tight Left", 1.0, False),
+            ("Tight Right", -1.0, False),
+            ("In-Place Left", 1.0, True),
+            ("In-Place Right", -1.0, True),
+        ]
+        for mode_name, tr, ip in modes:
+            for index in range(1, LEG_COUNT + 1):
+                for step in range(50):
+                    t = CYCLE_SECONDS * step / 50
+                    hip, knee = leg_joint_targets(
+                        index,
+                        t,
+                        BODY_CENTER_Z,
+                        turn_rate=tr,
+                        in_place=ip,
+                    )
+                    self.assertGreaterEqual(
+                        hip,
+                        HIP_LIMITS[0],
+                        f"{mode_name} Leg {index} hip {hip} < min",
+                    )
+                    self.assertLessEqual(
+                        hip,
+                        HIP_LIMITS[1],
+                        f"{mode_name} Leg {index} hip {hip} > max",
+                    )
+                    self.assertGreaterEqual(
+                        knee,
+                        KNEE_LIMITS[0],
+                        f"{mode_name} Leg {index} knee {knee} < min",
+                    )
+                    self.assertLessEqual(
+                        knee,
+                        KNEE_LIMITS[1],
+                        f"{mode_name} Leg {index} knee {knee} > max",
+                    )
+                    # Verify safe margins: hip peak < 0.35 rad (limit 0.60), knee < 0.35 rad (limit 1.20)
+                    self.assertLess(abs(hip), 0.35, f"{mode_name} Leg {index} hip exceeds margin")
+                    self.assertLess(knee, 0.35, f"{mode_name} Leg {index} knee exceeds margin")
+
+    def test_positive_negative_turn_stride_symmetry(self):
+        """Verify exact stride and kinematic symmetry between +turn_rate and -turn_rate on mirrored legs."""
+        for tr in (0.25, 0.50, 0.75, 1.0):
+            for left_idx, right_idx in ((1, 2), (3, 4), (5, 6)):
+                # Evaluate each leg at its actual stance start and end based on its tripod phase
+                t_l_start = (0.0 if left_idx in TRIPOD_A else 0.5) * CYCLE_SECONDS
+                t_l_end = t_l_start + STANCE_DUTY_FACTOR * CYCLE_SECONDS
+                reach_l_start, _ = foot_target(left_idx, t_l_start, turn_rate=tr)
+                reach_l_end, _ = foot_target(left_idx, t_l_end, turn_rate=tr)
+                disp_left = abs(reach_l_start - reach_l_end)
+
+                t_r_start = (0.0 if right_idx in TRIPOD_A else 0.5) * CYCLE_SECONDS
+                t_r_end = t_r_start + STANCE_DUTY_FACTOR * CYCLE_SECONDS
+                reach_r_start, _ = foot_target(right_idx, t_r_start, turn_rate=-tr)
+                reach_r_end, _ = foot_target(right_idx, t_r_end, turn_rate=-tr)
+                disp_right = abs(reach_r_start - reach_r_end)
+
+                self.assertAlmostEqual(
+                    disp_left,
+                    disp_right,
+                    places=7,
+                    msg=f"Asymmetric displacement between leg {left_idx} (+{tr}) and leg {right_idx} (-{tr})",
+                )
+
+    def test_turning_kinematic_targets_are_finite_and_continuous(self):
+        """Verify no NaN, Inf, or discontinuous jumps occur in turning IK targets."""
+        for tr in (-0.5, -0.25, 0.0, 0.25, 0.5):
+            for ip in (False, True):
+                for index in range(1, LEG_COUNT + 1):
+                    prev_hip, prev_knee = None, None
+                    for step in range(120):
+                        t = CYCLE_SECONDS * step / 120
+                        hip, knee = leg_joint_targets(
+                            index,
+                            t,
+                            BODY_CENTER_Z,
+                            turn_rate=tr,
+                            in_place=ip,
+                        )
+                        self.assertTrue(math.isfinite(hip), f"Non-finite hip on leg {index}")
+                        self.assertTrue(math.isfinite(knee), f"Non-finite knee on leg {index}")
+                        if prev_hip is not None:
+                            # Step delta should be smooth (< 0.15 rad per 50ms step)
+                            self.assertLess(
+                                abs(hip - prev_hip),
+                                0.15,
+                                f"Discontinuous hip jump on leg {index} at t={t}",
+                            )
+                            self.assertLess(
+                                abs(knee - prev_knee),
+                                0.15,
+                                f"Discontinuous knee jump on leg {index} at t={t}",
+                            )
+                        prev_hip, prev_knee = hip, knee
+
+    def test_in_place_stride_scale_workspace_limits(self):
+        """Verify that scaled in-place strides respect workspace and joint limits."""
+        self.assertGreaterEqual(IN_PLACE_STRIDE_SCALE, 1.0)
+        self.assertLessEqual(IN_PLACE_STRIDE_SCALE, 2.0)
+        for tr in (-1.0, 1.0):
+            for index in range(1, LEG_COUNT + 1):
+                for step in range(60):
+                    t = CYCLE_SECONDS * step / 60
+                    hip, knee = leg_joint_targets(
+                        index,
+                        t,
+                        BODY_CENTER_Z,
+                        turn_rate=tr,
+                        in_place=True,
+                    )
+                    self.assertGreaterEqual(hip, HIP_LIMITS[0])
+                    self.assertLessEqual(hip, HIP_LIMITS[1])
+                    self.assertGreaterEqual(knee, KNEE_LIMITS[0])
+                    self.assertLessEqual(knee, KNEE_LIMITS[1])
+                    # Safe margin verification (< 0.40 rad for hip, < 0.40 rad for knee)
+                    self.assertLess(abs(hip), 0.40, f"Hip angle {hip} on leg {index} exceeds margin")
+                    self.assertLess(knee, 0.40, f"Knee angle {knee} on leg {index} exceeds margin")
+
+    def test_in_place_turning_direction_and_mirrored_symmetry(self):
+        """Verify that positive and negative in-place turns produce opposite, mirrored foot sweeps."""
+        for left_idx, right_idx in ((1, 2), (5, 6)):
+            t_l_start = (0.0 if left_idx in TRIPOD_A else 0.5) * CYCLE_SECONDS
+            t_l_end = t_l_start + STANCE_DUTY_FACTOR * CYCLE_SECONDS
+            r_pos_start, _ = foot_target(left_idx, t_l_start, turn_rate=1.0, in_place=True)
+            r_pos_end, _ = foot_target(left_idx, t_l_end, turn_rate=1.0, in_place=True)
+            delta_pos = r_pos_end - r_pos_start
+
+            r_neg_start, _ = foot_target(left_idx, t_l_start, turn_rate=-1.0, in_place=True)
+            r_neg_end, _ = foot_target(left_idx, t_l_end, turn_rate=-1.0, in_place=True)
+            delta_neg = r_neg_end - r_neg_start
+
+            # Opposite signs
+            self.assertAlmostEqual(delta_pos, -delta_neg, places=7)
+            # Scaled displacement should match base * IN_PLACE_STRIDE_SCALE
+            expected_stride = STRIDE_LENGTH * IN_PLACE_STRIDE_SCALE
+            leg_proj = abs(math.cos(leg_geometry(left_idx).angle))
+            self.assertAlmostEqual(abs(delta_pos), expected_stride * leg_proj, places=7)
+
+    def test_in_place_stride_scale_preserves_straight_walking(self):
+        """Verify that straight walking (in_place=False) remains 100% unaffected by in-place scaling."""
+        for leg_idx in range(1, LEG_COUNT + 1):
+            for step in range(30):
+                t = CYCLE_SECONDS * step / 30
+                r_straight, lift_straight = foot_target(
+                    leg_idx, t, turn_rate=0.0, in_place=False
+                )
+                # Stride in straight walking must use unscaled STRIDE_LENGTH
+                leg = leg_geometry(leg_idx)
+                phase_offset = 0.0 if leg_idx in TRIPOD_A else 0.5
+                phase = (t / CYCLE_SECONDS + phase_offset) % 1.0
+                if phase < STANCE_DUTY_FACTOR:
+                    prog = phase / STANCE_DUTY_FACTOR
+                    expected_disp = STRIDE_LENGTH / 2 - STRIDE_LENGTH * prog
+                else:
+                    prog = (phase - STANCE_DUTY_FACTOR) / (1.0 - STANCE_DUTY_FACTOR)
+                    expected_disp = -STRIDE_LENGTH / 2 + STRIDE_LENGTH * prog
+                expected_r = UPPER_LEG_LENGTH + math.cos(leg.angle) * expected_disp
+                self.assertAlmostEqual(r_straight, expected_r, places=7)
 
 
 if __name__ == "__main__":
