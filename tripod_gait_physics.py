@@ -31,6 +31,7 @@ def foot_target(
     cycle_seconds=CYCLE_SECONDS,
     turn_rate=0.0,
     in_place=False,
+    direction="forward",
 ):
     """Return the leg-plane forward reach and lift height for a tripod cycle.
 
@@ -48,6 +49,8 @@ def foot_target(
     in_place : bool
         If True, left and right tripods take equal and opposite strides to rotate
         in place about the robot's center of mass.
+    direction : str
+        Walking direction: 'forward' or 'backward'. Defaults to 'forward'.
     """
     if not 1 <= leg_index <= LEG_COUNT:
         raise ValueError(f"leg index must be between 1 and {LEG_COUNT}")
@@ -57,6 +60,10 @@ def foot_target(
         raise ValueError("cycle_seconds must be positive")
     if not -1.0 <= turn_rate <= 1.0:
         raise ValueError("turn_rate must be between -1.0 and 1.0")
+    if direction not in ("forward", "backward"):
+        raise ValueError(
+            f"direction must be 'forward' or 'backward', got {direction!r}"
+        )
 
     leg = leg_geometry(leg_index)
     forward_projection = math.cos(leg.angle)
@@ -72,15 +79,17 @@ def foot_target(
         stride_scale = (1.0 - turn_rate) if is_left else (1.0 + turn_rate)
         leg_stride = STRIDE_LENGTH * stride_scale
 
+    dir_sign = -1.0 if (direction == "backward" and not in_place) else 1.0
+
     if phase < STANCE_DUTY_FACTOR:
         progress = phase / STANCE_DUTY_FACTOR
-        world_forward_displacement = (
+        world_forward_displacement = dir_sign * (
             leg_stride / 2 - leg_stride * progress
         )
         lift = 0.0
     else:
         progress = (phase - STANCE_DUTY_FACTOR) / (1.0 - STANCE_DUTY_FACTOR)
-        world_forward_displacement = (
+        world_forward_displacement = dir_sign * (
             -leg_stride / 2 + leg_stride * progress
         )
         lift = SWING_HEIGHT * math.sin(math.pi * progress)
@@ -134,6 +143,7 @@ def leg_joint_targets(
     cycle_seconds=CYCLE_SECONDS,
     turn_rate=0.0,
     in_place=False,
+    direction="forward",
 ):
     """Convert a tripod foot target to joint angles and enforce safe limits."""
     reach, lift = foot_target(
@@ -142,6 +152,7 @@ def leg_joint_targets(
         cycle_seconds,
         turn_rate=turn_rate,
         in_place=in_place,
+        direction=direction,
     )
     hip_angle, knee_angle = solve_planar_ik(reach, body_height - lift)
     if not HIP_LIMITS[0] <= hip_angle <= HIP_LIMITS[1]:
@@ -192,6 +203,23 @@ def _load_physics_legs(sim):
     return body, legs
 
 
+def _get_remote_client(port=None):
+    from coppeliasim_zmqremoteapi_client import RemoteAPIClient
+    import socket
+    if port is not None:
+        return RemoteAPIClient(port=port)
+    for p in (23000, 23001):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.2)
+        try:
+            s.connect(("127.0.0.1", p))
+            s.close()
+            return RemoteAPIClient(port=p)
+        except Exception:
+            pass
+    return RemoteAPIClient()
+
+
 def _stop_simulation(sim):
     if sim.getSimulationState() == sim.simulation_stopped:
         return
@@ -203,22 +231,86 @@ def _stop_simulation(sim):
         time.sleep(0.02)
 
 
+
+class GaitResult(tuple):
+    """2-tuple (forward_distance, dyaw) with full telemetry attributes."""
+
+    def __new__(
+        cls,
+        dx,
+        dyaw,
+        dy=0.0,
+        dz=0.0,
+        final_z=BODY_CENTER_Z,
+        droll=0.0,
+        dpitch=0.0,
+        cycles_completed=0,
+        target_reached=True,
+        foot_slip=None,
+        foot_scrub=None,
+        wall_seconds=0.0,
+        start_pos=None,
+        end_pos=None,
+        start_ori=None,
+        end_ori=None,
+    ):
+        inst = super().__new__(cls, (dx, dyaw))
+        inst.dx = dx
+        inst.dyaw = dyaw
+        inst.dy = dy
+        inst.dz = dz
+        inst.final_z = final_z
+        inst.droll = droll
+        inst.dpitch = dpitch
+        inst.cycles_completed = cycles_completed
+        inst.target_reached = target_reached
+        inst.foot_slip = foot_slip or {}
+        inst.foot_scrub = foot_scrub or {}
+        inst.wall_seconds = wall_seconds
+        inst.start_pos = start_pos or (0.0, 0.0, 0.0)
+        inst.end_pos = end_pos or (0.0, 0.0, 0.0)
+        inst.start_ori = start_ori or (0.0, 0.0, 0.0)
+        inst.end_ori = end_ori or (0.0, 0.0, 0.0)
+        return inst
+
+
+def _wrap_deg(d):
+    """Wrap angle to [-180.0, 180.0) degrees."""
+    return (d + 180.0) % 360.0 - 180.0
+
+
 def run_gait(
-    cycles=3,
+    cycles=5,
     cycle_seconds=CYCLE_SECONDS,
     turn_rate=0.0,
     in_place=False,
+    direction="forward",
+    target_yaw=None,
+    target_yaw_tol=2.0,
+    max_cycles=60,
+    port=None,
 ):
-    if cycles <= 0:
-        raise ValueError("cycles must be a positive integer")
+    if target_yaw is not None:
+        in_place = True
+        if turn_rate == 0.0:
+            turn_rate = 1.0 if target_yaw > 0 else -1.0
+        if max_cycles <= 0:
+            raise ValueError("max_cycles must be a positive integer")
+        if target_yaw_tol <= 0:
+            raise ValueError("target_yaw_tol must be positive")
+    else:
+        if cycles <= 0:
+            raise ValueError("cycles must be a positive integer")
     if cycle_seconds <= 0:
         raise ValueError("cycle_seconds must be positive")
     if not -1.0 <= turn_rate <= 1.0:
         raise ValueError("turn_rate must be between -1.0 and 1.0")
+    if direction not in ("forward", "backward"):
+        raise ValueError(
+            f"direction must be 'forward' or 'backward', got {direction!r}"
+        )
 
-    from coppeliasim_zmqremoteapi_client import RemoteAPIClient
-
-    client = RemoteAPIClient()
+    client = _get_remote_client(port=port)
     sim = client.require("sim")
     if sim.getSimulationState() != sim.simulation_stopped:
         raise RuntimeError("Stop CoppeliaSim before starting the physics gait.")
@@ -248,16 +340,66 @@ def run_gait(
         stepping_enabled = True
         sim.startSimulation()
         start_time = sim.getSimulationTime()
-        while sim.getSimulationTime() - start_time < cycles * cycle_seconds:
+        start_yaw_rad = start_orientation[2]
+        cos_start_yaw = math.cos(start_yaw_rad)
+        sin_start_yaw = math.sin(start_yaw_rad)
+        cycle_limit = max_cycles if target_yaw is not None else cycles
+        target_reached = False if target_yaw is not None else True
+        active_turn_rate = turn_rate
+        elapsed = 0.0
+
+        if target_yaw is not None:
+            LOGGER.info(
+                "Starting target-based rotation: target=%+.2f deg, tolerance=±%.2f deg, max_cycles=%d",
+                target_yaw,
+                target_yaw_tol,
+                max_cycles,
+            )
+
+        while sim.getSimulationTime() - start_time < cycle_limit * cycle_seconds:
             elapsed = sim.getSimulationTime() - start_time
+
+            if target_yaw is not None:
+                cur_ori = sim.getObjectOrientation(body, sim.handle_world)
+                cur_yaw_diff = _wrap_deg(
+                    math.degrees(
+                        math.atan2(
+                            math.sin(cur_ori[2] - start_yaw_rad),
+                            math.cos(cur_ori[2] - start_yaw_rad),
+                        )
+                    )
+                )
+                yaw_error = _wrap_deg(target_yaw - cur_yaw_diff)
+
+                if abs(yaw_error) <= target_yaw_tol:
+                    target_reached = True
+                    LOGGER.info(
+                        "Target yaw reached: target=%+.2f deg, actual=%+.2f deg (error=%+.2f deg within ±%.2f deg tolerance at elapsed=%.2f s).",
+                        target_yaw,
+                        cur_yaw_diff,
+                        yaw_error,
+                        target_yaw_tol,
+                        elapsed,
+                    )
+                    break
+
+                # Scale turn_rate when near target to avoid overshoot
+                if abs(yaw_error) < 6.0:
+                    active_turn_rate = math.copysign(
+                        max(0.25, abs(yaw_error) / 6.0), yaw_error
+                    )
+                else:
+                    active_turn_rate = 1.0 if yaw_error > 0 else -1.0
+
             for index, (hip, knee) in enumerate(legs, start=1):
                 hip_angle, knee_angle = leg_joint_targets(
                     index,
                     elapsed,
                     BODY_CENTER_Z,
                     cycle_seconds,
-                    turn_rate=turn_rate,
+                    turn_rate=active_turn_rate,
                     in_place=in_place,
+                    direction=direction,
                 )
                 sim.setJointTargetPosition(hip, hip_angle)
                 sim.setJointTargetPosition(knee, knee_angle)
@@ -291,16 +433,54 @@ def run_gait(
                 last_logged_cycle = cycle_number
                 cur_pos = sim.getObjectPosition(body, sim.handle_world)
                 cur_ori = sim.getObjectOrientation(body, sim.handle_world)
-                cur_yaw_deg = math.degrees(cur_ori[2] - start_orientation[2])
-                LOGGER.info(
-                    "Completed tripod gait cycle %d of %d (dx=%.4f m, dyaw=%.2f deg)",
-                    cycle_number,
-                    cycles,
-                    cur_pos[0] - start_position[0],
-                    cur_yaw_deg,
+                cur_dx = (
+                    (cur_pos[0] - start_position[0]) * cos_start_yaw
+                    + (cur_pos[1] - start_position[1]) * sin_start_yaw
                 )
+                cur_yaw_deg = _wrap_deg(
+                    math.degrees(
+                        math.atan2(
+                            math.sin(cur_ori[2] - start_yaw_rad),
+                            math.cos(cur_ori[2] - start_yaw_rad),
+                        )
+                    )
+                )
+                if target_yaw is not None:
+                    LOGGER.info(
+                        "Tripod cycle %d (target=%+.1f deg, actual=%+.2f deg, error=%+.2f deg, dx=%.4f m)",
+                        cycle_number,
+                        target_yaw,
+                        cur_yaw_deg,
+                        _wrap_deg(target_yaw - cur_yaw_deg),
+                        cur_dx,
+                    )
+                else:
+                    LOGGER.info(
+                        "Completed tripod gait cycle %d of %d (dx=%.4f m, dyaw=%.2f deg)",
+                        cycle_number,
+                        cycles,
+                        cur_dx,
+                        cur_yaw_deg,
+                    )
 
-        if last_logged_cycle < cycles:
+        if target_yaw is not None and not target_reached and not interrupted:
+            cur_ori = sim.getObjectOrientation(body, sim.handle_world)
+            cur_yaw_deg = _wrap_deg(
+                math.degrees(
+                    math.atan2(
+                        math.sin(cur_ori[2] - start_yaw_rad),
+                        math.cos(cur_ori[2] - start_yaw_rad),
+                    )
+                )
+            )
+            LOGGER.warning(
+                "Target yaw NOT reached within %d cycles (target=%+.2f deg, actual=%+.2f deg, error=%+.2f deg)",
+                max_cycles,
+                target_yaw,
+                cur_yaw_deg,
+                _wrap_deg(target_yaw - cur_yaw_deg),
+            )
+        elif target_yaw is None and last_logged_cycle < cycles:
             LOGGER.info("Completed tripod gait cycle %d of %d", cycles, cycles)
 
         end_position = sim.getObjectPosition(body, sim.handle_world)
@@ -316,15 +496,23 @@ def run_gait(
                 LOGGER.warning("Failed to restore stepping mode: %s", exc)
         _stop_simulation(sim)
 
-    def _wrap_deg(d):
-        return (d + 180.0) % 360.0 - 180.0
-
-    forward_distance = end_position[0] - start_position[0]
-    lateral_distance = end_position[1] - start_position[1]
+    world_dx = end_position[0] - start_position[0]
+    world_dy = end_position[1] - start_position[1]
+    cos_yaw = math.cos(start_orientation[2])
+    sin_yaw = math.sin(start_orientation[2])
+    forward_distance = world_dx * cos_yaw + world_dy * sin_yaw
+    lateral_distance = -world_dx * sin_yaw + world_dy * cos_yaw
     vertical_distance = end_position[2] - start_position[2]
     droll = _wrap_deg(math.degrees(end_orientation[0] - start_orientation[0]))
     dpitch = _wrap_deg(math.degrees(end_orientation[1] - start_orientation[1]))
-    dyaw = _wrap_deg(math.degrees(end_orientation[2] - start_orientation[2]))
+    dyaw = _wrap_deg(
+        math.degrees(
+            math.atan2(
+                math.sin(end_orientation[2] - start_orientation[2]),
+                math.cos(end_orientation[2] - start_orientation[2]),
+            )
+        )
+    )
 
     LOGGER.info(
         "Initial pose: pos=[%.4f, %.4f, %.4f] m, ori=[%.2f, %.2f, %.2f] deg",
@@ -384,26 +572,61 @@ def run_gait(
         cum_path_slip[6] * 1000.0,
     )
 
+    completed_cycles = (
+        last_logged_cycle if last_logged_cycle > 0
+        else (int(elapsed / cycle_seconds) if cycle_seconds > 0 else 0)
+    )
+
     if not interrupted:
-        if in_place:
+        if target_yaw is not None:
+            yaw_err = abs(_wrap_deg(target_yaw - dyaw))
+            if yaw_err > target_yaw_tol:
+                raise RuntimeError(
+                    f"Target yaw {target_yaw:+.1f} deg was not reached within tolerance ±{target_yaw_tol:.1f} deg (actual dyaw={dyaw:+.2f} deg, error={yaw_err:.2f} deg)."
+                )
+        elif in_place:
             if abs(dyaw) <= 0.5:
                 raise RuntimeError(
                     "In-place yaw rotation was not measurable (> 0.5 deg); inspect steering."
                 )
         elif abs(turn_rate) < 0.9:
-            if forward_distance <= 0.01:
-                raise RuntimeError(
-                    "Forward progress was not measurable (> 0.01 m); inspect contacts and tune gait."
-                )
-    return forward_distance, dyaw
+            if direction == "backward":
+                if forward_distance >= -0.01:
+                    raise RuntimeError(
+                        "Backward progress was not measurable (< -0.01 m); inspect contacts and tune gait."
+                    )
+            else:
+                if forward_distance <= 0.01:
+                    raise RuntimeError(
+                        "Forward progress was not measurable (> 0.01 m); inspect contacts and tune gait."
+                    )
+
+    return GaitResult(
+        forward_distance,
+        dyaw,
+        dy=lateral_distance,
+        dz=vertical_distance,
+        final_z=end_position[2],
+        droll=droll,
+        dpitch=dpitch,
+        cycles_completed=completed_cycles,
+        target_reached=target_reached,
+        foot_slip=cum_path_slip,
+        foot_scrub=net_stance_scrub,
+        wall_seconds=elapsed,
+        start_pos=tuple(start_position),
+        end_pos=tuple(end_position),
+        start_ori=tuple(start_orientation),
+        end_ori=tuple(end_orientation),
+    )
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Run a slow, physics-based tripod gait with planar IK."
     )
-    parser.add_argument("--cycles", type=int, default=3)
-    parser.add_argument("--cycle-seconds", type=float, default=CYCLE_SECONDS)
+    parser.add_argument("--cycles", type=int, default=5, help="Number of gait cycles (default: 5).")
+    parser.add_argument("--cycle-seconds", type=float, default=CYCLE_SECONDS, help="Cycle duration in seconds (default: 6.0).")
     parser.add_argument(
         "--turn-rate",
         type=float,
@@ -415,6 +638,36 @@ def main():
         action="store_true",
         help="Rotate in place around the body center instead of translating forward.",
     )
+    parser.add_argument(
+        "--direction",
+        choices=["forward", "backward"],
+        default="forward",
+        help="Walking direction: forward or backward (default: forward).",
+    )
+    parser.add_argument(
+        "--target-yaw",
+        type=float,
+        default=None,
+        help="Target yaw angle in degrees (e.g. 30 for left, -30 for right). Automatically enables in-place rotation.",
+    )
+    parser.add_argument(
+        "--target-yaw-tol",
+        type=float,
+        default=2.0,
+        help="Target yaw tolerance in degrees (default: 2.0).",
+    )
+    parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=60,
+        help="Maximum gait cycles allowed when reaching a target yaw (default: 60).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="ZeroMQ Remote API port (default: auto-detect 23000 then 23001).",
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     run_gait(
@@ -422,6 +675,11 @@ def main():
         cycle_seconds=args.cycle_seconds,
         turn_rate=args.turn_rate,
         in_place=args.in_place,
+        direction=args.direction,
+        target_yaw=args.target_yaw,
+        target_yaw_tol=args.target_yaw_tol,
+        max_cycles=args.max_cycles,
+        port=args.port,
     )
 
 

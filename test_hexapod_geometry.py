@@ -740,6 +740,120 @@ class HexapodGeometryTests(unittest.TestCase):
                 expected_r = UPPER_LEG_LENGTH + math.cos(leg.angle) * expected_disp
                 self.assertAlmostEqual(r_straight, expected_r, places=7)
 
+    def test_backward_walking_stride_direction_is_opposite_of_forward(self):
+        """Verify that backward walking produces exact opposite radial stride displacement from forward walking."""
+        for leg_idx in range(1, LEG_COUNT + 1):
+            for step in range(60):
+                t = CYCLE_SECONDS * step / 60
+                r_fwd, lift_fwd = foot_target(leg_idx, t, direction="forward")
+                r_bwd, lift_bwd = foot_target(leg_idx, t, direction="backward")
+
+                # Vertical lift profile must be identical
+                self.assertAlmostEqual(lift_fwd, lift_bwd, places=7)
+
+                # Radial displacement relative to neutral reach must be exact opposite
+                disp_fwd = r_fwd - UPPER_LEG_LENGTH
+                disp_bwd = r_bwd - UPPER_LEG_LENGTH
+                self.assertAlmostEqual(
+                    disp_fwd,
+                    -disp_bwd,
+                    places=7,
+                    msg=f"Displacement not opposite on leg {leg_idx} at t={t}",
+                )
+
+        # Check stance sweep direction for front legs (1 and 2):
+        # Forward: foot moves backward during stance (r_start > r_end for positive forward_projection)
+        # Backward: foot moves forward during stance (r_start < r_end for positive forward_projection)
+        for front_idx in (1, 2):
+            t_start = (0.0 if front_idx in TRIPOD_A else 0.5) * CYCLE_SECONDS
+            t_end = t_start + STANCE_DUTY_FACTOR * CYCLE_SECONDS
+            rf_start, _ = foot_target(front_idx, t_start, direction="forward")
+            rf_end, _ = foot_target(front_idx, t_end, direction="forward")
+            rb_start, _ = foot_target(front_idx, t_start, direction="backward")
+            rb_end, _ = foot_target(front_idx, t_end, direction="backward")
+
+            delta_fwd = rf_end - rf_start
+            delta_bwd = rb_end - rb_start
+            self.assertLess(delta_fwd, 0.0, "Forward stance should sweep leg inward/backward")
+            self.assertGreater(delta_bwd, 0.0, "Backward stance should sweep leg outward/forward")
+            self.assertAlmostEqual(delta_fwd, -delta_bwd, places=7)
+
+    def test_backward_walking_all_legs_ik_within_limits_at_nominal_height(self):
+        """Verify all legs stay well within limits across a full cycle in backward walking."""
+        for index in range(1, LEG_COUNT + 1):
+            for step in range(200):
+                t = CYCLE_SECONDS * step / 200
+                hip, knee = leg_joint_targets(
+                    index, t, BODY_CENTER_Z, direction="backward"
+                )
+                self.assertLess(abs(hip), 0.35, f"Leg {index} hip {hip} exceeds margin in backward")
+                self.assertGreater(knee, -0.10)
+                self.assertLess(knee, 0.40)
+
+    def test_backward_walking_with_turning_modes_ik_within_limits(self):
+        """Verify all legs satisfy joint limits across curved turning modes in backward walking."""
+        modes = [
+            ("Backward Arc Left", 0.5),
+            ("Backward Arc Right", -0.5),
+            ("Backward Tight Left", 1.0),
+            ("Backward Tight Right", -1.0),
+        ]
+        for mode_name, tr in modes:
+            for index in range(1, LEG_COUNT + 1):
+                for step in range(50):
+                    t = CYCLE_SECONDS * step / 50
+                    hip, knee = leg_joint_targets(
+                        index,
+                        t,
+                        BODY_CENTER_Z,
+                        turn_rate=tr,
+                        in_place=False,
+                        direction="backward",
+                    )
+                    self.assertGreaterEqual(
+                        hip,
+                        HIP_LIMITS[0],
+                        f"{mode_name} Leg {index} hip {hip} < min",
+                    )
+                    self.assertLessEqual(
+                        hip,
+                        HIP_LIMITS[1],
+                        f"{mode_name} Leg {index} hip {hip} > max",
+                    )
+                    self.assertGreaterEqual(
+                        knee,
+                        KNEE_LIMITS[0],
+                        f"{mode_name} Leg {index} knee {knee} < min",
+                    )
+                    self.assertLessEqual(
+                        knee,
+                        KNEE_LIMITS[1],
+                        f"{mode_name} Leg {index} knee {knee} > max",
+                    )
+                    self.assertLess(abs(hip), 0.35, f"{mode_name} Leg {index} hip exceeds margin")
+                    self.assertLess(knee, 0.35, f"{mode_name} Leg {index} knee exceeds margin")
+
+    def test_backward_walking_preserves_in_place_behavior(self):
+        """Verify that in_place=True behavior is identical regardless of direction parameter."""
+        for tr in (-1.0, 0.0, 1.0):
+            for index in range(1, LEG_COUNT + 1):
+                for step in range(30):
+                    t = CYCLE_SECONDS * step / 30
+                    rf, lf = foot_target(index, t, turn_rate=tr, in_place=True, direction="forward")
+                    rb, lb = foot_target(index, t, turn_rate=tr, in_place=True, direction="backward")
+                    self.assertEqual(rf, rb)
+                    self.assertEqual(lf, lb)
+
+    def test_direction_parameter_validation(self):
+        """Verify that invalid direction arguments are rejected."""
+        with self.assertRaises(ValueError):
+            foot_target(1, 0.0, direction="sideways")
+        with self.assertRaises(ValueError):
+            foot_target(1, 0.0, direction="")
+        with self.assertRaises(ValueError):
+            leg_joint_targets(1, 0.0, direction="invalid")
+
 
 if __name__ == "__main__":
     unittest.main()
+

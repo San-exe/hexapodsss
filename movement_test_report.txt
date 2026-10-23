@@ -1,0 +1,158 @@
+==============================================================================
+  HEXAPOD MOVEMENT TEST REPORT
+  Generated   : 2026-10-23 14:25:20
+  Started     : 2026-10-23 14:19:41
+  Cycles      : 5 per walking movement
+  Scaling     : sublinear (multiplier=4.40)
+  Thresholds  : trans=0.132m, curve_trans=0.088m, curve_yaw=0.25deg, target_yaw=±30.0deg (tol=±2.0deg)
+==============================================================================
+
+  SUMMARY: 7 PASS, 0 FAIL, 1 INCONCLUSIVE, 0 ERROR, 0 SKIPPED  out of 8 tests
+
+  #    STATUS        NAME                                             dx (m) dyaw (deg) time (s)
+  ----------------------------------------------------------------------------
+  1    PASS          Walk Forward                                     0.2072       0.11     25.3
+  2    PASS          Walk Backward                                   -0.2101       0.27     23.3
+  3    PASS          Walk Forward + Turn Left (rate=0.5)              0.2032       0.57     91.3
+  4    PASS          Walk Forward + Turn Right (rate=-0.5)            0.1936      -1.05     20.2
+  5    PASS          Walk Backward + Turn Left (rate=0.5)            -0.1967      -1.20     15.0
+  6    INCONCLUSIVE  Walk Backward + Turn Right (rate=-0.5)          -0.1893       0.23     14.7
+  7    PASS          In-Place Rotate Left (+30 deg target)           -0.0073      28.00     61.7
+  8    PASS          In-Place Rotate Right (-30 deg target)           0.0111     -28.01     71.5
+
+------------------------------------------------------------------------------
+  DETAILED RESULTS
+------------------------------------------------------------------------------
+
+  Test 1: Walk Forward
+    Status     : PASS
+    Parameters : {'cycles': 5, 'cycle_seconds': 6.0, 'turn_rate': 0.0, 'in_place': False, 'direction': 'forward'}
+    Pass rule  : dx >= 0.132 m
+    dx         : 0.2072 m
+    dyaw       : 0.11 deg
+    Wall time  : 25.3 s
+    Body height: 0.3396 m (dz: -0.0004 m)
+    Attitude   : droll=-0.06 deg, dpitch=+0.06 deg
+    Cycles run : 4
+    Target reached: True
+    Foot slip  : L1=148.1mm, L2=154.5mm, L3=174.5mm, L4=174.5mm, L5=149.9mm, L6=151.3mm
+    Cumul. dx  : 0.2072 m   (drift since start)
+    Cumul. yaw : 0.11 deg (drift since start)
+    Assessment : Forward translation confirmed: 0.2072 m >= 0.1320 m
+
+  Test 2: Walk Backward
+    Status     : PASS
+    Parameters : {'cycles': 5, 'cycle_seconds': 6.0, 'turn_rate': 0.0, 'in_place': False, 'direction': 'backward'}
+    Pass rule  : dx <= -0.132 m
+    dx         : -0.2101 m
+    dyaw       : 0.27 deg
+    Wall time  : 23.3 s
+    Body height: 0.3396 m (dz: -0.0003 m)
+    Attitude   : droll=-0.06 deg, dpitch=+0.02 deg
+    Cycles run : 4
+    Target reached: True
+    Foot slip  : L1=147.9mm, L2=153.4mm, L3=174.4mm, L4=174.4mm, L5=155.1mm, L6=146.4mm
+    Cumul. dx  : -0.0029 m   (drift since start)
+    Cumul. yaw : 0.38 deg (drift since start)
+    Assessment : Backward translation confirmed: -0.2101 m <= -0.1320 m
+
+  Test 3: Walk Forward + Turn Left (rate=0.5)
+    Status     : PASS
+    Parameters : {'cycles': 5, 'cycle_seconds': 6.0, 'turn_rate': 0.5, 'in_place': False, 'direction': 'forward'}
+    Pass rule  : dx >= 0.088 m, dyaw > 0.0 deg (conclusive >= 0.25 deg)
+    dx         : 0.2032 m
+    dyaw       : 0.57 deg
+    Wall time  : 91.3 s
+    Body height: 0.3397 m (dz: -0.0002 m)
+    Attitude   : droll=-0.09 deg, dpitch=+0.05 deg
+    Cycles run : 4
+    Target reached: True
+    Foot slip  : L1=106.0mm, L2=215.2mm, L3=190.3mm, L4=143.5mm, L5=93.0mm, L6=226.8mm
+    Cumul. dx  : 0.2002 m   (drift since start)
+    Cumul. yaw : 0.95 deg (drift since start)
+    Assessment : Translation (0.2032 m) and left-turn yaw (+0.57 deg >= 0.25 deg) confirmed
+
+  Test 4: Walk Forward + Turn Right (rate=-0.5)
+    Status     : PASS
+    Parameters : {'cycles': 5, 'cycle_seconds': 6.0, 'turn_rate': -0.5, 'in_place': False, 'direction': 'forward'}
+    Pass rule  : dx >= 0.088 m, dyaw < 0.0 deg (conclusive <= -0.25 deg)
+    dx         : 0.1936 m
+    dyaw       : -1.05 deg
+    Wall time  : 20.2 s
+    Body height: 0.3393 m (dz: -0.0006 m)
+    Attitude   : droll=-0.00 deg, dpitch=+0.04 deg
+    Cycles run : 4
+    Target reached: True
+    Foot slip  : L1=218.5mm, L2=103.1mm, L3=151.1mm, L4=189.2mm, L5=227.5mm, L6=95.2mm
+    Cumul. dx  : 0.3938 m   (drift since start)
+    Cumul. yaw : -0.10 deg (drift since start)
+    Assessment : Translation (0.1936 m) and right-turn yaw (-1.05 deg <= -0.25 deg) confirmed
+
+  Test 5: Walk Backward + Turn Left (rate=0.5)
+    Status     : PASS
+    Parameters : {'cycles': 5, 'cycle_seconds': 6.0, 'turn_rate': 0.5, 'in_place': False, 'direction': 'backward'}
+    Pass rule  : dx <= -0.088 m, dyaw < 0.0 deg (conclusive <= -0.25 deg)
+    dx         : -0.1967 m
+    dyaw       : -1.20 deg
+    Wall time  : 15.0 s
+    Body height: 0.3397 m (dz: -0.0002 m)
+    Attitude   : droll=-0.09 deg, dpitch=+0.03 deg
+    Cycles run : 4
+    Target reached: True
+    Foot slip  : L1=89.4mm, L2=233.0mm, L3=181.7mm, L4=142.8mm, L5=101.9mm, L6=216.2mm
+    Cumul. dx  : 0.1971 m   (drift since start)
+    Cumul. yaw : -1.30 deg (drift since start)
+    Assessment : Translation (-0.1967 m) and reverse left-turn yaw (-1.20 deg <= -0.25 deg) confirmed
+
+  Test 6: Walk Backward + Turn Right (rate=-0.5)
+    Status     : INCONCLUSIVE
+    Parameters : {'cycles': 5, 'cycle_seconds': 6.0, 'turn_rate': -0.5, 'in_place': False, 'direction': 'backward'}
+    Pass rule  : dx <= -0.088 m, dyaw > 0.0 deg (conclusive >= 0.25 deg)
+    dx         : -0.1893 m
+    dyaw       : 0.23 deg
+    Wall time  : 14.7 s
+    Body height: 0.3395 m (dz: -0.0005 m)
+    Attitude   : droll=-0.03 deg, dpitch=+0.01 deg
+    Cycles run : 4
+    Target reached: True
+    Foot slip  : L1=221.0mm, L2=97.2mm, L3=144.7mm, L4=186.9mm, L5=227.4mm, L6=101.1mm
+    Cumul. dx  : 0.0078 m   (drift since start)
+    Cumul. yaw : -1.07 deg (drift since start)
+    Assessment : Translation passed (-0.1893 m) and yaw direction is positive (+0.23 deg), but magnitude is below noise threshold (0.25 deg); steering inconclusive
+
+  Test 7: In-Place Rotate Left (+30 deg target)
+    Status     : PASS
+    Parameters : {'target_yaw': 30.0, 'target_yaw_tol': 2.0, 'max_cycles': 60, 'cycle_seconds': 3.0, 'in_place': True}
+    Pass rule  : dyaw reaches +30.0 deg within ±2.0 deg tolerance
+    dx         : -0.0073 m
+    dyaw       : 28.00 deg
+    Wall time  : 61.7 s
+    Body height: 0.3401 m (dz: +0.0002 m)
+    Attitude   : droll=-0.01 deg, dpitch=-0.01 deg
+    Cycles run : 36
+    Target reached: True
+    Foot slip  : L1=1225.9mm, L2=1325.6mm, L3=922.5mm, L4=909.8mm, L5=1312.7mm, L6=1193.6mm
+    Cumul. dx  : 0.0005 m   (drift since start)
+    Cumul. yaw : 26.94 deg (drift since start)
+    Assessment : Target-based left rotation confirmed: actual=+28.00 deg reached target=+30.0 deg (error=2.00 deg <= ±2.0 deg)
+
+  Test 8: In-Place Rotate Right (-30 deg target)
+    Status     : PASS
+    Parameters : {'target_yaw': -30.0, 'target_yaw_tol': 2.0, 'max_cycles': 60, 'cycle_seconds': 3.0, 'in_place': True}
+    Pass rule  : dyaw reaches -30.0 deg within ±2.0 deg tolerance
+    dx         : 0.0111 m
+    dyaw       : -28.01 deg
+    Wall time  : 71.5 s
+    Body height: 0.3394 m (dz: -0.0006 m)
+    Attitude   : droll=+0.02 deg, dpitch=+0.06 deg
+    Cycles run : 34
+    Target reached: True
+    Foot slip  : L1=1365.7mm, L2=1201.3mm, L3=891.0mm, L4=848.0mm, L5=1208.8mm, L6=1331.8mm
+    Cumul. dx  : 0.0116 m   (drift since start)
+    Cumul. yaw : -1.07 deg (drift since start)
+    Assessment : Target-based right rotation confirmed: actual=-28.01 deg reached target=-30.0 deg (error=1.99 deg <= ±2.0 deg)
+
+==============================================================================
+  CUMULATIVE DRIFT ACROSS ALL TESTS:  dx=0.0116 m  dyaw=-1.07 deg
+  (Each movement was measured from its own starting pose, not from the origin.)
+==============================================================================
